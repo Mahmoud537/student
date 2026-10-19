@@ -1,0 +1,33 @@
+{
+  "name": "student-gradebook",
+  "version": "1.0.0",
+  "description": "Arabic student grades and attendance tracker",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5000",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5000"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mahmoud537/student.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/Mahmoud537/student/issues"
+  },
+  "homepage": "https://github.com/Mahmoud537/student#readme",
+  "dependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "lucide-react": "^1.59.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}
