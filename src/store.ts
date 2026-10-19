@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from "react";
 import type {
+  AbsenceBreakdown,
   AppData,
-  AttendanceRecord,
   StudentTermResult,
+  TermWeek,
   WeeklyAssessment,
 } from "./model";
 
@@ -22,6 +23,9 @@ const blankData: AppData = {
   examScores: [],
   attendance: [],
   termStartDate: todayIso,
+  schoolName: "",
+  educationAdministration: "",
+  educationDirectorate: "",
 };
 
 let cachedData = readFromStorage();
@@ -33,15 +37,29 @@ function readFromStorage(): AppData {
     if (!stored) return blankData;
     const parsed = JSON.parse(stored) as Partial<AppData>;
     if (parsed.version !== 1) return blankData;
+    const termStartDate =
+      typeof parsed.termStartDate === "string"
+        ? parsed.termStartDate
+        : blankData.termStartDate;
+    const weeklyAssessments = Array.isArray(parsed.weeklyAssessments)
+      ? parsed.weeklyAssessments.map((record) => ({
+          ...record,
+          weekNumber:
+            Number.isInteger(record.weekNumber) &&
+            record.weekNumber >= 1 &&
+            record.weekNumber <= 19
+              ? record.weekNumber
+              : getWeekNumberFromDate(record.weekStart, termStartDate),
+        }))
+      : [];
     return {
       ...blankData,
       ...parsed,
+      termStartDate,
       classes: Array.isArray(parsed.classes) ? parsed.classes : [],
       subjects: Array.isArray(parsed.subjects) ? parsed.subjects : [],
       students: Array.isArray(parsed.students) ? parsed.students : [],
-      weeklyAssessments: Array.isArray(parsed.weeklyAssessments)
-        ? parsed.weeklyAssessments
-        : [],
+      weeklyAssessments,
       examScores: Array.isArray(parsed.examScores) ? parsed.examScores : [],
       attendance: Array.isArray(parsed.attendance) ? parsed.attendance : [],
     };
@@ -105,11 +123,60 @@ function toLocalIso(date: Date): string {
     .slice(0, 10);
 }
 
+function getWeekNumberFromDate(weekStart: string, termStartDate: string): number {
+  const [startYear, startMonth, startDay] = termStartDate.split("-").map(Number);
+  const [weekYear, weekMonth, weekDay] = weekStart.split("-").map(Number);
+  const values = [startYear, startMonth, startDay, weekYear, weekMonth, weekDay];
+  if (values.some((value) => !Number.isFinite(value))) return 1;
+  const start = Date.UTC(startYear, startMonth - 1, startDay);
+  const week = Date.UTC(weekYear, weekMonth - 1, weekDay);
+  return Math.max(1, Math.floor((week - start) / 604_800_000) + 1);
+}
+
+export function getWeekStartDate(termStartDate: string, weekNumber: number): string {
+  const [year, month, day] = termStartDate.split("-").map(Number);
+  return toLocalIso(new Date(year, month - 1, day + (weekNumber - 1) * 7));
+}
+
 export function getTermBounds(startDate: string): { start: string; end: string } {
   const start = new Date(`${startDate}T00:00:00`);
   const endExclusive = addMonthsClamped(startDate, 5);
   endExclusive.setDate(endExclusive.getDate() - 1);
   return { start: toLocalIso(start), end: toLocalIso(endExclusive) };
+}
+
+export function getTermWeeks(startDate: string): TermWeek[] {
+  const termEnd = getTermBounds(startDate).end;
+  return Array.from({ length: 19 }, (_, index) => {
+    const start = getWeekStartDate(startDate, index + 1);
+    const weekEnd = new Date(`${start}T12:00:00`);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    const end = toLocalIso(weekEnd);
+    return { number: index + 1, start, end: end > termEnd ? termEnd : end };
+  });
+}
+
+export function getAbsenceBreakdown(
+  data: AppData,
+  classId: string,
+  studentId: string,
+  from: string,
+  to: string,
+): AbsenceBreakdown {
+  const absences = data.attendance.filter(
+    (record) =>
+      record.classId === classId &&
+      record.studentId === studentId &&
+      record.status === "absent" &&
+      record.date >= from &&
+      record.date <= to,
+  );
+  return {
+    total: absences.length,
+    excused: absences.filter((record) => record.absenceType === "excused").length,
+    unexcused: absences.filter((record) => record.absenceType === "unexcused").length,
+    unclassified: absences.filter((record) => !record.absenceType).length,
+  };
 }
 
 export function getStudentTermResult(
@@ -118,23 +185,27 @@ export function getStudentTermResult(
   subjectId: string,
   studentId: string,
 ): StudentTermResult {
-  const bounds = getTermBounds(data.termStartDate);
   const weekly = data.weeklyAssessments.filter(
     (record) =>
       record.classId === classId &&
       record.subjectId === subjectId &&
       record.studentId === studentId &&
-      record.weekStart >= bounds.start &&
-      record.weekStart <= bounds.end,
+      record.weekNumber >= 1 &&
+      record.weekNumber <= 19,
   );
   const weeklyScores = weekly.map(
     (record) =>
       record.homework + record.notebook + record.weekly + record.conduct,
   );
-  const weeklyAverage =
-    weeklyScores.length > 0
-      ? weeklyScores.reduce((sum, score) => sum + score, 0) / weeklyScores.length
+  const average = (scores: number[]) =>
+    scores.length > 0
+      ? scores.reduce((sum, score) => sum + score, 0) / scores.length
       : null;
+  const weeklyAverage = average(weeklyScores);
+  const homeworkAverage = average(weekly.map((record) => record.homework));
+  const notebookAverage = average(weekly.map((record) => record.notebook));
+  const weeklyAssessmentAverage = average(weekly.map((record) => record.weekly));
+  const conductAverage = average(weekly.map((record) => record.conduct));
   const exams = data.examScores.find(
     (record) =>
       record.classId === classId &&
@@ -146,20 +217,27 @@ export function getStudentTermResult(
       ? (exams.testOne + exams.testTwo) / 2
       : null;
   const isComplete = weeklyAverage !== null && examAverage !== null;
-  const attendance: AttendanceRecord[] = data.attendance.filter(
-    (record) =>
-      record.classId === classId &&
-      record.studentId === studentId &&
-      record.date >= bounds.start &&
-      record.date <= bounds.end &&
-      record.status === "absent",
+  const bounds = getTermBounds(data.termStartDate);
+  const absenceBreakdown = getAbsenceBreakdown(
+    data,
+    classId,
+    studentId,
+    bounds.start,
+    bounds.end,
   );
   return {
     weeklyAverage,
+    homeworkAverage,
+    notebookAverage,
+    weeklyAssessmentAverage,
+    conductAverage,
     examAverage,
     total: isComplete ? weeklyAverage + examAverage : null,
     weeklyCount: weekly.length,
-    absenceCount: attendance.length,
+    absenceCount: absenceBreakdown.total,
+    excusedAbsenceCount: absenceBreakdown.excused,
+    unexcusedAbsenceCount: absenceBreakdown.unexcused,
+    unclassifiedAbsenceCount: absenceBreakdown.unclassified,
     isComplete,
   };
 }
@@ -181,7 +259,7 @@ export function upsertWeeklyAssessment(
       current.classId === record.classId &&
       current.subjectId === record.subjectId &&
       current.studentId === record.studentId &&
-      current.weekStart === record.weekStart,
+      current.weekNumber === record.weekNumber,
   );
   if (index < 0) return [...records, record];
   return records.map((current, position) => (position === index ? record : current));

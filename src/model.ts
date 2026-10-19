@@ -24,6 +24,7 @@ export interface WeeklyAssessment {
   classId: string;
   subjectId: string;
   studentId: string;
+  weekNumber: number;
   weekStart: string;
   homework: number;
   notebook: number;
@@ -48,6 +49,7 @@ export interface AttendanceRecord {
   studentId: string;
   date: string;
   status: "present" | "absent";
+  absenceType?: "excused" | "unexcused";
 }
 
 export interface AppData {
@@ -59,13 +61,36 @@ export interface AppData {
   examScores: ExamScores[];
   attendance: AttendanceRecord[];
   termStartDate: string;
+  schoolName?: string;
+  educationAdministration?: string;
+  educationDirectorate?: string;
 }
 
 export interface StudentTermResult {
   weeklyAverage: number | null;
+  homeworkAverage: number | null;
+  notebookAverage: number | null;
+  weeklyAssessmentAverage: number | null;
+  conductAverage: number | null;
   examAverage: number | null;
   total: number | null;
   weeklyCount: number;
   absenceCount: number;
+  excusedAbsenceCount: number;
+  unexcusedAbsenceCount: number;
+  unclassifiedAbsenceCount: number;
   isComplete: boolean;
+}
+
+export interface AbsenceBreakdown {
+  total: number;
+  excused: number;
+  unexcused: number;
+  unclassified: number;
+}
+
+export interface TermWeek {
+  number: number;
+  start: string;
+  end: string;
 }

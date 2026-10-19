@@ -7,7 +7,8 @@ import {
 } from "lucide-react";
 import type { AppData, AttendanceRecord, ExamScores, SchoolClass, Student, Subject, WeeklyAssessment } from "./model";
 import {
-  getStudentTermResult, getTermBounds, localDateString, makeId, updateAppData,
+  getAbsenceBreakdown, getStudentTermResult, getTermBounds, getTermWeeks,
+  getWeekStartDate, localDateString, makeId, updateAppData,
   upsertWeeklyAssessment, useAppData,
 } from "./store";
 
@@ -43,16 +44,14 @@ function displayNumber(value: number | null, fraction = 1) {
   return value === null ? "—" : new Intl.NumberFormat("ar", { maximumFractionDigits: fraction }).format(value);
 }
 function keyFor(...parts: string[]) { return parts.join("::"); }
-function getWeekMonday(date: Date) {
-  const day = date.getDay();
-  const monday = new Date(date);
-  monday.setDate(date.getDate() - ((day + 6) % 7));
-  return localDateString(monday);
-}
 function classInitial(name: string) { return (name.trim()[0] || "ف").toLocaleUpperCase("ar"); }
 function scoreOf(record: WeeklyAssessment) { return record.homework + record.notebook + record.weekly + record.conduct; }
-function countAbsent(data: AppData, studentId: string, from: string, to: string) {
-  return data.attendance.filter((item) => item.studentId === studentId && item.status === "absent" && item.date >= from && item.date <= to).length;
+function monthBounds(dateIso: string) {
+  const [year, month] = dateIso.split("-").map(Number);
+  return {
+    start: `${year}-${String(month).padStart(2, "0")}-01`,
+    end: localDateString(new Date(year, month, 0)),
+  };
 }
 
 function Field({ label, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) {
@@ -88,12 +87,18 @@ export default function App() {
   const [newSubjectName, setNewSubjectName] = useState("");
   const [gradeClassId, setGradeClassId] = useState("");
   const [gradeSubjectId, setGradeSubjectId] = useState("");
-  const [weekStart, setWeekStart] = useState(getWeekMonday(new Date()));
+  const [weekNumber, setWeekNumber] = useState(1);
   const [scoreDrafts, setScoreDrafts] = useState<Record<string, ScoreDraft>>({});
   const [examDrafts, setExamDrafts] = useState<Record<string, ExamDraft>>({});
   const [attendanceClassId, setAttendanceClassId] = useState("");
   const [attendanceDate, setAttendanceDate] = useState(localDateString());
   const [attendanceDraft, setAttendanceDraft] = useState<Record<string, "present" | "absent">>({});
+  const [absenceTypeDraft, setAbsenceTypeDraft] = useState<Record<string, "excused" | "unexcused">>({});
+  const [institutionDraft, setInstitutionDraft] = useState({
+    schoolName: data.schoolName ?? "",
+    educationAdministration: data.educationAdministration ?? "",
+    educationDirectorate: data.educationDirectorate ?? "",
+  });
   const [reportStudentId, setReportStudentId] = useState("");
   const [reportSubjectId, setReportSubjectId] = useState("");
 
@@ -109,6 +114,8 @@ export default function App() {
   const reportSubjects = data.subjects.filter((item) => reportClass?.subjectIds.includes(item.id));
   const reportSubject = reportSubjects.find((item) => item.id === reportSubjectId) ?? reportSubjects[0];
   const bounds = getTermBounds(data.termStartDate);
+  const termWeeks = getTermWeeks(data.termStartDate);
+  const weekStart = getWeekStartDate(data.termStartDate, weekNumber);
 
   useEffect(() => {
     if (!toast) return;
@@ -128,11 +135,12 @@ export default function App() {
     if (reportSubjects.length && !reportSubjects.some((item) => item.id === reportSubjectId)) setReportSubjectId(reportSubjects[0].id);
   }, [reportStudent?.id, data.subjects, reportSubjectId]);
   useEffect(() => {
-    if (weekStart < bounds.start || weekStart > bounds.end) {
-      setWeekStart(bounds.start);
-      setScoreDrafts({});
-    }
-  }, [bounds.start, bounds.end, weekStart]);
+    setInstitutionDraft({
+      schoolName: data.schoolName ?? "",
+      educationAdministration: data.educationAdministration ?? "",
+      educationDirectorate: data.educationDirectorate ?? "",
+    });
+  }, [data.schoolName, data.educationAdministration, data.educationDirectorate]);
 
   const notify = (text: string, kind: Notice["kind"] = "success") => {
     setNotice({ text, kind });
@@ -241,18 +249,16 @@ export default function App() {
     }), "تم حذف المادة وسجلات درجاتها");
   };
 
-  const weeklyRecordFor = (studentId: string) => data.weeklyAssessments.find((item) => item.classId === gradeClass?.id && item.subjectId === gradeSubjectId && item.studentId === studentId && item.weekStart === weekStart);
+  const weeklyRecordFor = (studentId: string) => data.weeklyAssessments.find((item) => item.classId === gradeClass?.id && item.subjectId === gradeSubjectId && item.studentId === studentId && item.weekNumber === weekNumber);
   const weeklyDraftFor = (studentId: string): ScoreDraft => {
-    const key = keyFor(studentId, gradeSubjectId, weekStart);
+    const key = keyFor(studentId, gradeSubjectId, String(weekNumber));
     if (scoreDrafts[key]) return scoreDrafts[key];
     const record = weeklyRecordFor(studentId);
     return record ? { homework: `${record.homework}`, notebook: `${record.notebook}`, weekly: `${record.weekly}`, conduct: `${record.conduct}` } : { homework: "", notebook: "", weekly: "", conduct: "" };
   };
   const saveWeekly = (studentId: string) => {
     if (!gradeClass || !gradeSubjectId) { notify("اختر فصلاً ومادة أولاً.", "error"); return; }
-    if (weekStart < bounds.start || weekStart > bounds.end) {
-      notify("اختر تاريخ أسبوع داخل مدة الفصل الدراسي.", "error"); return;
-    }
+    if (!Number.isInteger(weekNumber) || weekNumber < 1 || weekNumber > 19) { notify("اختر أسبوعاً من الأسابيع التسعة عشر.", "error"); return; }
     const draft = weeklyDraftFor(studentId);
     const limits: [keyof ScoreDraft, number][] = [["homework", 5], ["notebook", 5], ["weekly", 10], ["conduct", 5]];
     for (const [field, max] of limits) {
@@ -263,11 +269,11 @@ export default function App() {
     }
     const record: WeeklyAssessment = {
       id: weeklyRecordFor(studentId)?.id ?? makeId(), classId: gradeClass.id, subjectId: gradeSubjectId,
-      studentId, weekStart, homework: Number(draft.homework), notebook: Number(draft.notebook),
+      studentId, weekNumber, weekStart, homework: Number(draft.homework), notebook: Number(draft.notebook),
       weekly: Number(draft.weekly), conduct: Number(draft.conduct), updatedAt: new Date().toISOString(),
     };
     if (persist((current) => ({ ...current, weeklyAssessments: upsertWeeklyAssessment(current.weeklyAssessments, record) }), "حُفظت درجات الأسبوع")) {
-      setScoreDrafts((current) => ({ ...current, [keyFor(studentId, gradeSubjectId, weekStart)]: { ...draft } }));
+      setScoreDrafts((current) => ({ ...current, [keyFor(studentId, gradeSubjectId, String(weekNumber))]: { ...draft } }));
     }
   };
   const examRecordFor = (studentId: string) => data.examScores.find((item) => item.classId === gradeClass?.id && item.subjectId === gradeSubjectId && item.studentId === studentId);
@@ -291,21 +297,43 @@ export default function App() {
     }
   };
 
+  const attendanceRecordFor = (student: Student) => data.attendance.find((item) => item.classId === attendanceClass?.id && item.studentId === student.id && item.date === attendanceDate);
   const getAttendanceStatus = (student: Student): "present" | "absent" => {
     if (attendanceDraft[student.id]) return attendanceDraft[student.id];
-    return data.attendance.find((item) => item.classId === attendanceClass?.id && item.studentId === student.id && item.date === attendanceDate)?.status ?? "present";
+    return attendanceRecordFor(student)?.status ?? "present";
+  };
+  const getAbsenceType = (student: Student): "" | "excused" | "unexcused" => {
+    return absenceTypeDraft[student.id] ?? attendanceRecordFor(student)?.absenceType ?? "";
   };
   const saveAttendance = () => {
     if (!attendanceClass) { notify("أضف فصلاً وطلاباً أولاً.", "error"); return; }
-    const records: AttendanceRecord[] = attendanceStudents.map((student) => ({
-      id: data.attendance.find((item) => item.classId === attendanceClass.id && item.studentId === student.id && item.date === attendanceDate)?.id ?? makeId(),
-      classId: attendanceClass.id, studentId: student.id, date: attendanceDate, status: getAttendanceStatus(student),
-    }));
-    if (persist((current) => ({ ...current, attendance: [...current.attendance.filter((item) => !(item.classId === attendanceClass.id && item.date === attendanceDate)), ...records] }), "حُفظ سجل الحضور")) setAttendanceDraft({});
+    const records: AttendanceRecord[] = attendanceStudents.map((student) => {
+      const status = getAttendanceStatus(student);
+      const absenceType = getAbsenceType(student);
+      return {
+        id: attendanceRecordFor(student)?.id ?? makeId(),
+        classId: attendanceClass.id,
+        studentId: student.id,
+        date: attendanceDate,
+        status,
+        ...(status === "absent" && absenceType ? { absenceType } : {}),
+      };
+    });
+    if (records.some((record) => record.status === "absent" && !record.absenceType)) {
+      notify("حدّد الغياب بعذر أو بدون عذر لكل طالب غائب قبل الحفظ.", "error"); return;
+    }
+    if (persist((current) => ({ ...current, attendance: [...current.attendance.filter((item) => !(item.classId === attendanceClass.id && item.date === attendanceDate)), ...records] }), "حُفظ سجل الحضور")) {
+      setAttendanceDraft({});
+      setAbsenceTypeDraft({});
+    }
   };
   const changeTermStart = (value: string) => {
     if (!value) return;
     persist((current) => ({ ...current, termStartDate: value }), "تم تحديث بداية الفصل الدراسي");
+  };
+  const saveInstitutionDetails = (event: FormEvent) => {
+    event.preventDefault();
+    persist((current) => ({ ...current, ...institutionDraft }), "تم حفظ بيانات المدرسة والإدارة");
   };
 
   const renderOverview = () => {
@@ -343,13 +371,19 @@ export default function App() {
         </section>
       </div>
       <section className="panel" style={{marginTop:16}}>
-        <PanelTitle title="إعداد الفصل الدراسي" detail="الفصل ينتهي تلقائياً بعد خمسة أشهر تقويمية، مع احتساب يوم النهاية." action={<span className="badge neutral"><Settings2 size={13} /> خاص بهذا الجهاز</span>} />
-        <div className="panel-body">
-          <div className="filters" style={{margin:0}}>
+        <PanelTitle title="بيانات الفصل والمدرسة" detail="الفصل الأول يمتد خمسة أشهر ويضم 19 أسبوع متابعة، كما في سجل الرصد." action={<span className="badge neutral"><Settings2 size={13} /> خاص بهذا الجهاز</span>} />
+        <form className="panel-body" onSubmit={saveInstitutionDetails}>
+          <div className="filters" style={{marginBottom:12}}>
             <Field label="بداية الفصل الدراسي"><input className="input" type="date" value={data.termStartDate} onChange={(event) => changeTermStart(event.target.value)} /></Field>
             <div style={{alignSelf:"center",fontSize:12,color:"var(--muted)"}}>من <strong style={{color:"var(--ink)"}}>{shortDate(bounds.start)}</strong> إلى <strong style={{color:"var(--ink)"}}>{shortDate(bounds.end)}</strong></div>
           </div>
-        </div>
+          <div className="filters" style={{margin:0}}>
+            <Field label="المدرسة"><input className="input" value={institutionDraft.schoolName} onChange={(event) => setInstitutionDraft((current) => ({...current, schoolName:event.target.value}))} maxLength={80} placeholder="اسم المدرسة" /></Field>
+            <Field label="الإدارة التعليمية"><input className="input" value={institutionDraft.educationAdministration} onChange={(event) => setInstitutionDraft((current) => ({...current, educationAdministration:event.target.value}))} maxLength={80} placeholder="اسم الإدارة" /></Field>
+            <Field label="المديرية التعليمية"><input className="input" value={institutionDraft.educationDirectorate} onChange={(event) => setInstitutionDraft((current) => ({...current, educationDirectorate:event.target.value}))} maxLength={80} placeholder="اسم المديرية" /></Field>
+            <button className="button primary" type="submit"><Save /> حفظ البيانات</button>
+          </div>
+        </form>
       </section>
     </>;
   };
@@ -392,7 +426,7 @@ export default function App() {
               <Field label="رقم / رمز (اختياري)"><input className="input" value={newStudentCode} onChange={(e) => setNewStudentCode(e.target.value)} placeholder="رقم الطالب" maxLength={30} /></Field>
               <button className="button primary" type="submit" aria-label="إضافة طالب"><Plus /></button>
             </form>
-            {classStudents.length ? <div className="table-wrap"><table className="data-table" style={{minWidth:450}}><thead><tr><th>الطالب</th><th>الرمز</th><th>إجراءات</th></tr></thead><tbody>{classStudents.map((student) => <tr key={student.id}><td><div className="student-cell"><span className="student-initial">{classInitial(student.name)}</span>{student.name}</div></td><td className="muted">{student.code || "—"}</td><td><div className="management-actions"><button className="button ghost small" onClick={() => editStudent(student)}>تعديل الاسم</button><button className="icon-button" aria-label={`حذف ${student.name}`} onClick={() => deleteStudent(student)}><Trash2 /></button></div></td></tr>)}</tbody></table></div> : <Empty title="الفصل جاهز لاستقبال طلابه" detail="أضف اسم الطالب أعلاه، ويمكنك إضافة رقمه التعريفي اختياريًا." />}
+            {classStudents.length ? <div className="table-wrap"><table className="data-table" style={{minWidth:450}}><thead><tr><th>م</th><th>الطالب</th><th>الرمز</th><th>إجراءات</th></tr></thead><tbody>{classStudents.map((student, index) => <tr key={student.id}><td className="muted">{(index + 1).toLocaleString("ar")}</td><td><div className="student-cell"><span className="student-initial">{classInitial(student.name)}</span>{student.name}</div></td><td className="muted">{student.code || "—"}</td><td><div className="management-actions"><button className="button ghost small" onClick={() => editStudent(student)}>تعديل الاسم</button><button className="icon-button" aria-label={`حذف ${student.name}`} onClick={() => deleteStudent(student)}><Trash2 /></button></div></td></tr>)}</tbody></table></div> : <Empty title="الفصل جاهز لاستقبال طلابه" detail="أضف اسم الطالب أعلاه، ويمكنك إضافة رقمه التعريفي اختياريًا." />}
           </div>
         </> : <div className="panel-body"><Empty title="اختر فصلاً لإدارته" detail="أو أنشئ فصلاً جديداً من القائمة." /></div>}
       </section>
@@ -407,7 +441,7 @@ export default function App() {
     <div className="filters">
       <Field label="الفصل"><select className="select" value={gradeClass?.id ?? ""} onChange={(e) => {setGradeClassId(e.target.value);setGradeSubjectId("");}}><option value="">اختر الفصل</option>{data.classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></Field>
       <Field label="المادة"><select className="select" value={gradeSubjectId} onChange={(e) => setGradeSubjectId(e.target.value)} disabled={!gradeSubjects.length}><option value="">اختر المادة</option>{gradeSubjects.map((subject) => <option key={subject.id} value={subject.id}>{subject.name}</option>)}</select></Field>
-       <Field label="بداية الأسبوع"><input className="input" type="date" min={bounds.start} max={bounds.end} value={weekStart} onChange={(e) => {setWeekStart(e.target.value);setScoreDrafts({});}} /></Field>
+       <Field label="الأسبوع الدراسي (1–19)"><select className="select" value={weekNumber} onChange={(e) => {setWeekNumber(Number(e.target.value));setScoreDrafts({});}}>{termWeeks.map((week) => <option key={week.number} value={week.number}>الأسبوع {week.number.toLocaleString("ar")} · {shortDate(week.start)}</option>)}</select></Field>
       <div className="week-bar" style={{alignSelf:"end",fontSize:11,color:"var(--muted)"}}><span>الفصل: {shortDate(bounds.start)} – {shortDate(bounds.end)}</span></div>
     </div>
     {notice && <div className="notice-stack"><div className={`notice ${notice.kind}`}><AlertCircle />{notice.text}</div></div>}
@@ -415,9 +449,9 @@ export default function App() {
       : !gradeSubjects.length ? <section className="panel"><Empty title="لا توجد مواد لهذا الفصل" detail="أضف مادة واربطها بالفصل من إدارة الفصول." action={<button className="button light" onClick={() => navigate("classes")}>إدارة المواد <ArrowLeft /></button>} /></section>
       : !gradeStudents.length ? <section className="panel"><Empty title="لا يوجد طلاب في هذا الفصل" detail="أضف الطلاب قبل إدخال درجاتهم." action={<button className="button light" onClick={() => navigate("classes")}>إضافة طلاب <ArrowLeft /></button>} /></section>
       : <section className="panel">
-        <PanelTitle title="متابعة الأسبوع والاختبارات" detail="المتابعة من 25، وكل اختبار من 15. كل جزء يُحفظ بشكل مستقل." action={<span className="badge neutral">{shortDate(weekStart)}</span>} />
-        <div className="table-wrap"><table className="data-table"><thead><tr><th>الطالب</th><th>واجب<br/><small>من 5</small></th><th>دفتر<br/><small>من 5</small></th><th>أسبوعي<br/><small>من 10</small></th><th>مواظبة وسلوك<br/><small>من 5</small></th><th>مجموع الأسبوع<br/><small>من 25</small></th><th>حفظ الأسبوع</th><th>اختبار 1<br/><small>من 15</small></th><th>اختبار 2<br/><small>من 15</small></th><th>معدل الاختبارين<br/><small>من 15</small></th><th>مجموع الفصل<br/><small>من 40</small></th></tr></thead>
-          <tbody>{gradeStudents.map((student) => {
+        <PanelTitle title="متابعة الأسبوع والاختبارات" detail={`الأسبوع ${weekNumber.toLocaleString("ar")} · ${shortDate(weekStart)} · المتابعة من 25، وكل اختبار من 15.`} action={<span className="badge neutral">الأسبوع {weekNumber.toLocaleString("ar")} من 19</span>} />
+        <div className="table-wrap"><table className="data-table"><thead><tr><th>م</th><th>الطالب</th><th>واجب<br/><small>من 5</small></th><th>دفتر<br/><small>من 5</small></th><th>أسبوعي<br/><small>من 10</small></th><th>مواظبة وسلوك<br/><small>من 5</small></th><th>مجموع الأسبوع<br/><small>من 25</small></th><th>حفظ الأسبوع</th><th>اختبار 1<br/><small>من 15</small></th><th>اختبار 2<br/><small>من 15</small></th><th>معدل الاختبارين<br/><small>من 15</small></th><th>مجموع الفصل<br/><small>من 40</small></th></tr></thead>
+          <tbody>{gradeStudents.map((student, index) => {
             const draft = weeklyDraftFor(student.id); const examDraft = examDraftFor(student.id);
             const vals = [draft.homework,draft.notebook,draft.weekly,draft.conduct].map((value) => value === "" ? null : Number(value));
             const weeklySum = vals.every((value) => value !== null && Number.isFinite(value)) ? (vals as number[]).reduce((a,b) => a+b,0) : null;
@@ -426,8 +460,8 @@ export default function App() {
             const examAvg = examOne !== null && examTwo !== null && Number.isFinite(examOne) && Number.isFinite(examTwo) ? (examOne + examTwo) / 2 : null;
             const result = getStudentTermResult(data, gradeClass!.id, gradeSubjectId, student.id);
             return <tr key={student.id}>
-              <td><div className="student-cell"><span className="student-initial">{classInitial(student.name)}</span>{student.name}</div></td>
-              {(["homework","notebook","weekly","conduct"] as const).map((field, index) => <td key={field}><input className="score-input" aria-label={`${student.name} ${["الواجب","الدفتر","الأسبوعي","المواظبة والسلوك"][index]}`} type="number" min="0" max={[5,5,10,5][index]} step="0.5" value={draft[field]} onChange={(e) => setScoreDrafts((current) => ({...current,[keyFor(student.id,gradeSubjectId,weekStart)]:{...draft,[field]:e.target.value}}))} /></td>)}
+              <td className="muted">{(index + 1).toLocaleString("ar")}</td><td><div className="student-cell"><span className="student-initial">{classInitial(student.name)}</span>{student.name}</div></td>
+              {(["homework","notebook","weekly","conduct"] as const).map((field, index) => <td key={field}><input className="score-input" aria-label={`${student.name} ${["الواجب","الدفتر","الأسبوعي","المواظبة والسلوك"][index]}`} type="number" min="0" max={[5,5,10,5][index]} step="0.5" value={draft[field]} onChange={(e) => setScoreDrafts((current) => ({...current,[keyFor(student.id,gradeSubjectId,String(weekNumber))]:{...draft,[field]:e.target.value}}))} /></td>)}
               <td><span className="sum-pill">{weeklySum === null ? "—" : `${displayNumber(weeklySum)} / 25`}</span></td>
               <td><button className="button light small" onClick={() => saveWeekly(student.id)}><Save /> حفظ</button></td>
               {(["testOne","testTwo"] as const).map((field, index) => <td key={field}><input className="score-input" aria-label={`${student.name} الاختبار ${index + 1}`} type="number" min="0" max="15" step="0.5" value={examDraft[field]} onChange={(e) => setExamDrafts((current) => ({...current,[keyFor(student.id,gradeSubjectId)]:{...examDraft,[field]:e.target.value}}))} /></td>)}
@@ -440,11 +474,11 @@ export default function App() {
   </>;
 
   const renderAttendance = () => {
-    const monthPrefix = attendanceDate.slice(0, 7);
+    const activeMonth = monthBounds(attendanceDate);
     return <>
       <div className="filters">
-        <Field label="الفصل"><select className="select" value={attendanceClass?.id ?? ""} onChange={(e) => {setAttendanceClassId(e.target.value);setAttendanceDraft({});}}><option value="">اختر الفصل</option>{data.classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></Field>
-        <Field label="التاريخ"><input className="input" type="date" value={attendanceDate} onChange={(e) => {setAttendanceDate(e.target.value);setAttendanceDraft({});}} /></Field>
+        <Field label="الفصل"><select className="select" value={attendanceClass?.id ?? ""} onChange={(e) => {setAttendanceClassId(e.target.value);setAttendanceDraft({});setAbsenceTypeDraft({});}}><option value="">اختر الفصل</option>{data.classes.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></Field>
+        <Field label="التاريخ"><input className="input" type="date" value={attendanceDate} onChange={(e) => {setAttendanceDate(e.target.value);setAttendanceDraft({});setAbsenceTypeDraft({});}} /></Field>
         <div style={{alignSelf:"end",fontSize:11,color:"var(--muted)"}}>سجّل الحضور والغياب لهذا اليوم فقط.</div>
         <button className="button primary" style={{alignSelf:"end"}} onClick={saveAttendance} disabled={!attendanceStudents.length}><Save /> حفظ سجل اليوم</button>
       </div>
@@ -452,22 +486,29 @@ export default function App() {
       {!data.classes.length ? <section className="panel"><Empty title="لا توجد فصول بعد" detail="أنشئ فصلاً وأضف قائمة الطلاب لبدء تسجيل الحضور." action={<button className="button primary" onClick={() => navigate("classes")}><Plus /> إنشاء فصل</button>} /></section>
       : !attendanceStudents.length ? <section className="panel"><Empty title="لا يوجد طلاب لهذا الفصل" detail="أضف الطلاب أولاً، ثم ارجع لتسجيل حضورهم." action={<button className="button light" onClick={() => navigate("classes")}>إدارة الطلاب <ArrowLeft /></button>} /></section>
       : <section className="panel">
-        <PanelTitle title={`قائمة ${attendanceClass?.name ?? "الفصل"}`} detail={`${shortDate(attendanceDate)} · ${attendanceStudents.length.toLocaleString("ar")} طالب`} action={<span className="badge present">{attendanceStudents.filter((s) => getAttendanceStatus(s) === "present").length.toLocaleString("ar")} حاضر</span>} />
-        <div className="table-wrap"><table className="data-table" style={{minWidth:700}}><thead><tr><th>الطالب</th><th>حالة اليوم</th><th>غياب هذا الشهر</th><th>غياب الفصل الأول</th></tr></thead>
-          <tbody>{attendanceStudents.map((student) => {
+    <PanelTitle title={`قائمة ${attendanceClass?.name ?? "الفصل"}`} detail={`${shortDate(attendanceDate)} · ${attendanceStudents.length.toLocaleString("ar")} طالب`} action={<span className="badge present">{attendanceStudents.filter((s) => getAttendanceStatus(s) === "present").length.toLocaleString("ar")} حاضر</span>} />
+        <div className="table-wrap"><table className="data-table" style={{minWidth:900}}><thead><tr><th>م</th><th>الطالب</th><th>حالة اليوم ونوع الغياب</th><th>غياب الشهر المحدد</th><th>غياب الفصل الأول</th></tr></thead>
+          <tbody>{attendanceStudents.map((student, index) => {
             const status = getAttendanceStatus(student);
-            const monthly = data.attendance.filter((item) => item.classId === attendanceClass?.id && item.studentId === student.id && item.status === "absent" && item.date.startsWith(monthPrefix)).length;
-            const term = countAbsent(data, student.id, bounds.start, bounds.end);
-            return <tr key={student.id}><td><div className="student-cell"><span className="student-initial">{classInitial(student.name)}</span>{student.name}</div></td><td><div className="attendance-toggle"><button className={status === "present" ? "selected-present" : ""} onClick={() => setAttendanceDraft((current) => ({...current,[student.id]:"present"}))}>حاضر</button><button className={status === "absent" ? "selected-absent" : ""} onClick={() => setAttendanceDraft((current) => ({...current,[student.id]:"absent"}))}>غائب</button></div></td><td><span className={monthly ? "badge absent" : "badge present"}>{monthly.toLocaleString("ar")} أيام</span></td><td><span className={term ? "badge absent" : "badge present"}>{term.toLocaleString("ar")} أيام</span></td></tr>;
+            const monthly = getAbsenceBreakdown(data, attendanceClass!.id, student.id, activeMonth.start, activeMonth.end);
+            const term = getAbsenceBreakdown(data, attendanceClass!.id, student.id, bounds.start, bounds.end);
+            const absenceType = getAbsenceType(student);
+            return <tr key={student.id}>
+              <td className="muted">{(index + 1).toLocaleString("ar")}</td><td><div className="student-cell"><span className="student-initial">{classInitial(student.name)}</span>{student.name}</div></td>
+              <td><div className="attendance-cell"><div className="attendance-toggle"><button className={status === "present" ? "selected-present" : ""} onClick={() => setAttendanceDraft((current) => ({...current,[student.id]:"present"}))}>حاضر</button><button className={status === "absent" ? "selected-absent" : ""} onClick={() => setAttendanceDraft((current) => ({...current,[student.id]:"absent"}))}>غائب</button></div>
+                {status === "absent" && <select className="select absence-reason" aria-label={`نوع غياب ${student.name}`} value={absenceType} onChange={(event) => setAbsenceTypeDraft((current) => ({...current,[student.id]:event.target.value as "excused" | "unexcused"}))}><option value="">حدد السبب</option><option value="excused">بعذر</option><option value="unexcused">بدون عذر</option></select>}
+              </div></td>
+              {[monthly, term].map((summary, index) => <td key={index}><span className={summary.total ? "badge absent" : "badge present"}>{summary.total.toLocaleString("ar")} أيام</span><div className="absence-breakdown">بعذر {summary.excused.toLocaleString("ar")} · بدون عذر {summary.unexcused.toLocaleString("ar")}{summary.unclassified ? ` · غير محدد ${summary.unclassified.toLocaleString("ar")}` : ""}</div></td>)}
+            </tr>;
           })}</tbody>
         </table></div>
-        <div className="panel-body" style={{paddingTop:14}}><div className="notice info"><AlertCircle />السجل غير المحفوظ يبدأ بالحضور افتراضياً. اختر حالة كل طالب ثم احفظ؛ تُحسب أيام الغياب المسجلة فقط.</div></div>
+        <div className="panel-body" style={{paddingTop:14}}><div className="notice info"><AlertCircle />سجّل الحالة لكل طالب. عند اختيار الغياب، حدّد هل هو بعذر أو بدون عذر قبل حفظ سجل اليوم.</div></div>
       </section>}
     </>;
   };
 
   const renderReports = () => {
-    const reportRecords = reportStudent && reportSubject ? data.weeklyAssessments.filter((item) => item.classId === reportStudent.classId && item.studentId === reportStudent.id && item.subjectId === reportSubject.id && item.weekStart >= bounds.start && item.weekStart <= bounds.end).sort((a,b) => a.weekStart.localeCompare(b.weekStart)) : [];
+    const reportRecords = reportStudent && reportSubject ? data.weeklyAssessments.filter((item) => item.classId === reportStudent.classId && item.studentId === reportStudent.id && item.subjectId === reportSubject.id && item.weekNumber >= 1 && item.weekNumber <= 19).sort((a,b) => a.weekNumber - b.weekNumber) : [];
     const reportExam = reportStudent && reportSubject ? data.examScores.find((item) => item.classId === reportStudent.classId && item.studentId === reportStudent.id && item.subjectId === reportSubject.id) : undefined;
     const result = reportStudent && reportSubject && reportClass ? getStudentTermResult(data, reportClass.id, reportSubject.id, reportStudent.id) : undefined;
     const startDate = new Date(`${bounds.start}T12:00:00`);
@@ -476,7 +517,14 @@ export default function App() {
     const months = reportStudent ? Array.from({length:monthCount}, (_, index) => {
       const date = new Date(startDate.getFullYear(), startDate.getMonth() + index, 1);
       const month = localDateString(new Date(date.getFullYear(),date.getMonth(),1)).slice(0,7);
-      return { month, label: new Intl.DateTimeFormat("ar",{month:"long"}).format(date), count: data.attendance.filter((item) => item.classId === reportStudent.classId && item.studentId === reportStudent.id && item.status === "absent" && item.date >= bounds.start && item.date <= bounds.end && item.date.startsWith(month)).length };
+      const monthRange = monthBounds(`${month}-01`);
+      const from = monthRange.start < bounds.start ? bounds.start : monthRange.start;
+      const to = monthRange.end > bounds.end ? bounds.end : monthRange.end;
+      return {
+        month,
+        label: new Intl.DateTimeFormat("ar",{month:"long"}).format(date),
+        absence: getAbsenceBreakdown(data, reportStudent.classId, reportStudent.id, from, to),
+      };
     }) : [];
     return <>
       <div className="filters no-print">
@@ -488,16 +536,30 @@ export default function App() {
       {!reportStudent ? <section className="panel"><Empty title="لا يوجد طالب لاختيار تقريره" detail="أضف طالباً من قسم الفصول والطلاب، وسيظهر هنا." action={<button className="button light" onClick={() => navigate("classes")}>إدارة الطلاب <ArrowLeft /></button>} /></section>
       : !reportSubject ? <section className="panel"><Empty title="لا توجد مادة لهذا الطالب" detail="عيّن مادة لفصل الطالب من قسم إدارة الفصول." action={<button className="button light" onClick={() => navigate("classes")}>إدارة المواد <ArrowLeft /></button>} /></section>
       : <section className="panel print-area report-sheet">
-        <div className="report-header"><div><div className="eyebrow">دفتر الطالب · التقرير الفصلي</div><div className="report-title">{reportStudent.name}</div><div className="report-meta">{reportClass?.name}{reportStudent.code ? ` · رقم ${reportStudent.code}` : ""}<br/>المادة: {reportSubject.name}<br/>الفترة: {shortDate(bounds.start)} — {shortDate(bounds.end)}</div></div>
+        <div className="report-header"><div><div className="eyebrow">دفتر الطالب · التقرير الفصلي</div><div className="report-title">{reportStudent.name}</div><div className="report-meta">{data.schoolName ? `المدرسة: ${data.schoolName} · ` : ""}{reportClass?.name}{reportStudent.code ? ` · رقم ${reportStudent.code}` : ""}<br/>{data.educationAdministration ? `الإدارة التعليمية: ${data.educationAdministration} · ` : ""}{data.educationDirectorate ? `المديرية: ${data.educationDirectorate}<br/>` : ""}المادة: {reportSubject.name}<br/>الفترة: {shortDate(bounds.start)} — {shortDate(bounds.end)} · 19 أسبوعاً</div></div>
           <div className="report-total"><strong>{result?.total === null || result?.total === undefined ? "—" : displayNumber(result.total)}</strong><span>من 40 · {result?.isComplete ? "مكتمل" : "بيانات غير مكتملة"}</span></div>
         </div>
-        <div className="report-kpis"><div className="report-kpi"><span>متوسط المتابعة الأسبوعية · من 25</span><strong>{displayNumber(result?.weeklyAverage ?? null)}</strong></div><div className="report-kpi"><span>متوسط الاختبارين · من 15</span><strong>{displayNumber(result?.examAverage ?? null)}</strong></div><div className="report-kpi"><span>أسابيع مرصودة</span><strong>{(result?.weeklyCount ?? 0).toLocaleString("ar")}</strong></div></div>
+        <div className="report-kpis">
+          <div className="report-kpi"><span>متوسط الواجب · من 5</span><strong>{displayNumber(result?.homeworkAverage ?? null)}</strong></div>
+          <div className="report-kpi"><span>متوسط كراسة الحصة · من 5</span><strong>{displayNumber(result?.notebookAverage ?? null)}</strong></div>
+          <div className="report-kpi"><span>متوسط التقييم الأسبوعي · من 10</span><strong>{displayNumber(result?.weeklyAssessmentAverage ?? null)}</strong></div>
+          <div className="report-kpi"><span>متوسط المواظبة والسلوك · من 5</span><strong>{displayNumber(result?.conductAverage ?? null)}</strong></div>
+          <div className="report-kpi"><span>متوسط البنود · من 25</span><strong>{displayNumber(result?.weeklyAverage ?? null)}</strong></div>
+          <div className="report-kpi"><span>متوسط الاختبارين · من 15</span><strong>{displayNumber(result?.examAverage ?? null)}</strong></div>
+          <div className="report-kpi"><span>أسابيع مرصودة</span><strong>{(result?.weeklyCount ?? 0).toLocaleString("ar")} / 19</strong></div>
+        </div>
         <h3 className="section-title" style={{fontSize:14,margin:"22px 0 10px"}}>تفاصيل المتابعة الأسبوعية</h3>
-         {reportRecords.length ? <div className="table-wrap"><table className="data-table" style={{minWidth:570}}><thead><tr><th>الأسبوع</th><th>واجب / 5</th><th>دفتر / 5</th><th>أسبوعي / 10</th><th>مواظبة وسلوك / 5</th><th>المجموع / 25</th></tr></thead><tbody>{reportRecords.map((record) => <tr key={record.id}><td>{shortDate(record.weekStart)}</td><td>{record.homework}</td><td>{record.notebook}</td><td>{record.weekly}</td><td>{record.conduct}</td><td><strong>{scoreOf(record)}</strong></td></tr>)}</tbody></table></div> : <div className="notice info"><AlertCircle />لا توجد متابعة أسبوعية محفوظة ضمن مدة الفصل.</div>}
+          {reportRecords.length ? <div className="table-wrap"><table className="data-table" style={{minWidth:570}}><thead><tr><th>الأسبوع</th><th>تاريخ البداية</th><th>واجب / 5</th><th>كراسة الحصة / 5</th><th>أسبوعي / 10</th><th>مواظبة وسلوك / 5</th><th>المجموع / 25</th></tr></thead><tbody>{reportRecords.map((record) => <tr key={record.id}><td>{record.weekNumber.toLocaleString("ar")}</td><td>{shortDate(record.weekStart)}</td><td>{record.homework}</td><td>{record.notebook}</td><td>{record.weekly}</td><td>{record.conduct}</td><td><strong>{scoreOf(record)}</strong></td></tr>)}</tbody></table></div> : <div className="notice info"><AlertCircle />لا توجد متابعة أسبوعية محفوظة في الأسابيع التسعة عشر.</div>}
         <h3 className="section-title" style={{fontSize:14,margin:"22px 0 10px"}}>الاختبارات</h3>
         <div className="table-wrap"><table className="data-table" style={{minWidth:420}}><thead><tr><th>الاختبار الأول / 15</th><th>الاختبار الثاني / 15</th><th>المعدل / 15</th></tr></thead><tbody><tr><td>{reportExam?.testOne ?? "غير مسجل"}</td><td>{reportExam?.testTwo ?? "غير مسجل"}</td><td>{result?.examAverage === null || result?.examAverage === undefined ? "غير مكتمل" : displayNumber(result.examAverage)}</td></tr></tbody></table></div>
         <h3 className="section-title" style={{fontSize:14,margin:"22px 0 10px"}}>الغياب</h3>
-        <div className="report-kpis">{months.map((month) => <div className="report-kpi" key={month.month}><span>{month.label}</span><strong>{month.count.toLocaleString("ar")} أيام</strong></div>)}<div className="report-kpi"><span>مجموع غياب الفصل</span><strong>{(result?.absenceCount ?? 0).toLocaleString("ar")} أيام</strong></div></div>
+         <div className="report-kpis">
+           {months.map((month) => <div className="report-kpi" key={month.month}><span>{month.label}</span><strong>{month.absence.total.toLocaleString("ar")} أيام</strong><div className="absence-breakdown">بعذر {month.absence.excused.toLocaleString("ar")} · بدون عذر {month.absence.unexcused.toLocaleString("ar")}</div></div>)}
+           <div className="report-kpi"><span>إجمالي غياب الفصل</span><strong>{(result?.absenceCount ?? 0).toLocaleString("ar")} أيام</strong></div>
+           <div className="report-kpi"><span>غياب بعذر</span><strong>{(result?.excusedAbsenceCount ?? 0).toLocaleString("ar")} أيام</strong></div>
+           <div className="report-kpi"><span>غياب بدون عذر</span><strong>{(result?.unexcusedAbsenceCount ?? 0).toLocaleString("ar")} أيام</strong></div>
+           {(result?.unclassifiedAbsenceCount ?? 0) > 0 && <div className="report-kpi"><span>غياب يحتاج تصنيفاً</span><strong>{result?.unclassifiedAbsenceCount.toLocaleString("ar")} أيام</strong></div>}
+         </div>
         <div className="section-copy" style={{marginTop:18}}>الحساب: متوسط الأسابيع المرصودة + متوسط الاختبارين. لا تدخل القيم غير المسجلة في الحساب.</div>
       </section>}
     </>;
